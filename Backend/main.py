@@ -2,15 +2,17 @@ from fastapi import FastAPI, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from twilio.twiml.messaging_response import MessagingResponse
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
-# Load the GOOGLE_API_KEY and DATABASE_URL from the .env file
-load_dotenv()
+# Load the OPENAI_API_KEY and DATABASE_URL from the .env file
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 app = FastAPI()
 
@@ -23,12 +25,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Setup the AI Model (Using Gemini!)
-llm = ChatGoogleGenerativeAI(temperature=0.2, model="gemini-2.5-flash")
+# 1. Setup the AI Model (Using OpenAI!)
+llm = ChatOpenAI(temperature=0.2, model="gpt-4o-mini")
 
 # 2. The Strict System Prompt
 prompt_template = """
-You are an empathetic, professional triage nurse for a Pakistani telemedicine platform.
+You are Historia, an empathetic, professional medical assistant for a Pakistani telemedicine platform. Always introduce yourself as Historia.
 Your ONLY job is to collect patient history in a structured way.
 You must ask about:
 1. Chief Complaint (What is wrong?)
@@ -39,10 +41,18 @@ You must ask about:
 CRITICAL RULES:
 - You must NEVER diagnose the patient.
 - You must NEVER prescribe medication.
-- Ask one question at a time. Be empathetic.
+- Ask only one question at a time. Be empathetic.
 - If a patient asks for a diagnosis, politely tell them that only a doctor can diagnose, and you are here to gather information for the doctor.
 - VERY IMPORTANT: Once you have collected the 4 basic pieces of information, you MUST ask 5 to 8 relevant, detailed follow-up questions about their specific symptoms to build a comprehensive report.
-- After you have asked exactly 5 to 8 follow-up questions, politely end the triage session by telling the patient that you have everything the doctor needs. DO NOT ask any further questions after that.
+- You MUST ask these follow-up questions ONE BY ONE. Never bundle multiple questions together.
+- After you have asked exactly 5 to 8 follow-up questions in total, politely end the triage session by telling the patient that you have everything the doctor needs. DO NOT ask any further questions after that.
+
+LANGUAGE RULES:
+- If the patient communicates in Urdu or Roman Urdu and a language preference hasn't been set yet, your VERY NEXT response must ONLY be to acknowledge it and ask if they would prefer to continue the conversation in Roman Urdu or English.
+- IMPORTANT: Do NOT ask any clinical or triage questions in the same message where you ask for a language preference.
+- Example Choice Message: "I see you're speaking Urdu. Would you like to continue in English or Roman Urdu? (Kya aap Roman Urdu mein baat karna chahenge ya English mein?)"
+- Once the user chooses, you MUST strictly use that language for all future messages in this session.
+- If they choose Roman Urdu, ensure your clinical questions are clear, empathetic, and easy to understand in that language.
 
 Current conversation:
 {history}
@@ -139,8 +149,8 @@ async def web_chat(message: dict):
     try:
         ai_response = llm.invoke(final_prompt).content
     except Exception as e:
-        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-            return {"response": "The AI Doctor is currently busy due to high Google API traffic on your free tier. Please wait 60 seconds and click Send again!"}
+        if "429" in str(e) or "rate_limit" in str(e).lower():
+            return {"response": "The AI Doctor is currently busy due to OpenAI rate limits. Please wait 60 seconds and click Send again!"}
         return {"response": "An unexpected server error occurred."}
     
     # 3. Save Both Messages to Postgres
@@ -164,9 +174,9 @@ async def whatsapp_chat(Body: str = Form(...), From: str = Form(...)):
     try:
         ai_response = llm.invoke(final_prompt).content
     except Exception as e:
-        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+        if "429" in str(e) or "rate_limit" in str(e).lower():
             resp = MessagingResponse()
-            resp.message("The AI Doctor is currently busy with high patient volume. Please wait exactly 1 minute before sending another message to avoid API Free-Tier overload.")
+            resp.message("The AI Doctor is currently busy with high patient volume (OpenAI limit). Please wait exactly 1 minute before sending another message.")
             return PlainTextResponse(str(resp), media_type="application/xml")
         raise e
     
@@ -239,8 +249,8 @@ async def generate_summary(session_id: int):
     try:
         summary_result = llm.invoke(final_prompt).content
     except Exception as e:
-        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-            return {"summary": "Google API Rate Limit hit. Please wait 60 seconds, then try generating the summary again!"}
+        if "429" in str(e) or "rate_limit" in str(e).lower():
+            return {"summary": "OpenAI Rate Limit hit. Please wait 60 seconds, then try generating the summary again!"}
         return {"summary": "An unexpected error occurred while generating the summary."}
     
     # Insert the final generated report into the database under 'chief_complaint' as a general report dump.

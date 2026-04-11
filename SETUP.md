@@ -6,7 +6,7 @@ How to safely install and run the AI Triage Nurse locally from scratch.
 - **Python**: (v3.12 or newer. `uv` or `pip` virtual environments highly recommended)
 - **Postgres.app**: (Provides the local SQL Database strictly running on `localhost:5432`)
 - **ngrok**: (Required to securely tunnel your local Python server to the internet for Twilio)
-- **API Keys**: You will need free trial accounts for Google AI Studio and Twilio!
+- **API Keys**: You will need a developer account for OpenAI and Twilio!
 
 ## 2. PostgreSQL Database Setup
 1. Open Postgres.app and launch the terminal by double-clicking your database icon.
@@ -20,14 +20,14 @@ How to safely install and run the AI Triage Nurse locally from scratch.
 1. Open a terminal and strictly navigate into the backend folder: `cd Backend`
 2. Open or create the `.env` configuration file containing exactly:
 ```env
-GEMINI_API_KEY="your-google-ai-key-here"
+OPENAI_API_KEY="your-openai-api-key-here"
 TWILIO_ACCOUNT_SID="your-twilio-sid-here"
 TWILIO_AUTH_TOKEN="your-twilio-token-here"
 DATABASE_URL="postgresql://m.haadrehman@localhost:5432/triage_nurse_ai_bot"
 ```
 3. Initialize and activate your Python virtual environment (e.g. `uv venv`).
 4. Install exactly what your application requires:
-   `pip install fastapi uvicorn psycopg2-binary langchain langchain-google-genai twilio python-dotenv`
+   `pip install fastapi uvicorn psycopg2-binary langchain langchain-openai twilio python-dotenv`
 5. Run the live development server:
    `uvicorn main:app --reload`
 
