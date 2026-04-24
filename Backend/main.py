@@ -1,14 +1,58 @@
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Depends, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from twilio.twiml.messaging_response import MessagingResponse
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
 from pathlib import Path
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from typing import Optional
+
+from database import (
+    get_or_create_patient_session, 
+    get_chat_history, 
+    save_message, 
+    save_conversation,
+    get_active_sessions_list,
+    verify_session_active,
+    insert_summary,
+    initialize_db,
+    get_weekly_analytics,
+    get_symptom_data,
+    get_audit_logs,
+    get_user_by_username
+)
+
+# JWT Security Settings
+SECRET_KEY = "SUPER_SECRET_TRIAGE_KEY" # In production, use os.getenv("SECRET_KEY")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+# --- AUTH HELPERS ---
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        role: str = payload.get("role")
+        if username is None: raise HTTPException(status_code=401)
+        return {"username": username, "role": role}
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
 # Load the OPENAI_API_KEY and DATABASE_URL from the .env file
 env_path = Path(__file__).parent / ".env"
@@ -64,74 +108,20 @@ prompt = PromptTemplate(
     template=prompt_template
 )
 
-# ==========================================
-# DATABASE HELPER FUNCTIONS (Session IDs)
-# ==========================================
-
-def get_db_connection():
-    return psycopg2.connect(os.environ.get("DATABASE_URL"))
-
-def get_or_create_patient_session(phone_number: str) -> int:
-    """Finds active session for a phone number, creates patient & session if missing."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # 1. Look up the Patient by phone number
-    cursor.execute("SELECT patient_id FROM patients WHERE phone_number = %s", (phone_number,))
-    patient = cursor.fetchone()
-    
-    if not patient:
-        cursor.execute("INSERT INTO patients (phone_number) VALUES (%s) RETURNING patient_id", (phone_number,))
-        patient_id = cursor.fetchone()[0]
-    else:
-        patient_id = patient[0]
-        
-    # 2. Look up the Patient's Active Session
-    cursor.execute("SELECT session_id FROM chat_sessions WHERE patient_id = %s AND is_active = TRUE", (patient_id,))
-    session = cursor.fetchone()
-    
-    if not session:
-        cursor.execute("INSERT INTO chat_sessions (patient_id, is_active) VALUES (%s, TRUE) RETURNING session_id", (patient_id,))
-        session_id = cursor.fetchone()[0]
-    else:
-        session_id = session[0]
-        
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return session_id
-
-def get_chat_history(session_id: int) -> str:
-    """Retrieves all past messages for a specific session to feed to the AI."""
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    
-    # Efficient Indexed Query
-    cursor.execute("SELECT sender_type, content FROM messages WHERE session_id = %s ORDER BY created_at", (session_id,))
-    messages = cursor.fetchall()
-    
-    history_str = ""
-    for msg in messages:
-        if msg['sender_type'] == 'Human':
-            history_str += f"Patient: {msg['content']}\n"
-        else:
-            history_str += f"Nurse: {msg['content']}\n"
-            
-    cursor.close()
-    conn.close()
-    return history_str
-
-def save_message(session_id: int, sender_type: str, content: str):
-    """Logs a standalone message into the relational database."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO messages (session_id, sender_type, content) VALUES (%s, %s, %s)", (session_id, sender_type, content))
-    conn.commit()
-    cursor.close()
-    conn.close()
+# Initialize database tables on startup
+initialize_db()
 
 
 # --- API ENDPOINTS ---
+
+@app.post("/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = get_user_by_username(form_data.username)
+    if not user or not pwd_context.verify(form_data.password, user['hashed_password']):
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    
+    access_token = create_access_token(data={"sub": user['username'], "role": user['role']})
+    return {"access_token": access_token, "token_type": "bearer", "role": user['role']}
 
 @app.post("/chat/web")
 async def web_chat(message: dict):
@@ -156,6 +146,9 @@ async def web_chat(message: dict):
     # 3. Save Both Messages to Postgres
     save_message(session_id, "Human", user_message)
     save_message(session_id, "AI", ai_response)
+    
+    # 4. Save to the new 'conversations' table as requested
+    save_conversation(user_message, ai_response)
     
     return {"response": ai_response}
 
@@ -183,43 +176,24 @@ async def whatsapp_chat(Body: str = Form(...), From: str = Form(...)):
     save_message(session_id, "Human", Body)
     save_message(session_id, "AI", ai_response)
     
+    # Save to the new 'conversations' table as requested
+    save_conversation(Body, ai_response)
+    
     resp = MessagingResponse()
     resp.message(ai_response)
     return PlainTextResponse(str(resp), media_type="application/xml")
 
 @app.get("/active_sessions")
-async def get_active_sessions():
-    """Returns a list of all currently active triage patients connected to postgres."""
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("""
-        SELECT c.session_id, p.phone_number, c.created_at 
-        FROM chat_sessions c
-        JOIN patients p ON c.patient_id = p.patient_id
-        WHERE c.is_active = TRUE
-        ORDER BY c.created_at DESC
-    """)
-    sessions = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    
-    for s in sessions:
-        s['created_at'] = str(s['created_at'])  # Convert to string for JSON parsing
+async def get_active_sessions(current_user: dict = Depends(get_current_user)):
+    sessions = get_active_sessions_list(role=current_user['role'])
     return {"sessions": sessions}
 
 @app.get("/summary")
-async def generate_summary(session_id: int):
+async def generate_summary(session_id: int, current_user: dict = Depends(get_current_user)):
     """Generates the summary for the SPECIFIC requested session in DB."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
     
-    # Verify the heavily requested session exists and is active
-    cursor.execute("SELECT session_id FROM chat_sessions WHERE session_id = %s AND is_active = TRUE", (session_id,))
-    session = cursor.fetchone()
-    
-    if not session:
-        cursor.close()
-        conn.close()
+    # Verify the session exists and is active
+    if not verify_session_active(session_id):
         return {"summary": "This session is either not active or does not exist."}
         
     chat_history = get_chat_history(session_id)
@@ -227,6 +201,7 @@ async def generate_summary(session_id: int):
     if not chat_history:
         return {"summary": "No messages in the current session."}
     
+    # ... (Prompt logic) ...
     summary_template = """
     You are an expert medical assistant. Based on the conversation below between a triage nurse and a patient, extract the following information and format it clearly for a doctor:
     
@@ -249,19 +224,28 @@ async def generate_summary(session_id: int):
     try:
         summary_result = llm.invoke(final_prompt).content
     except Exception as e:
-        if "429" in str(e) or "rate_limit" in str(e).lower():
-            return {"summary": "OpenAI Rate Limit hit. Please wait 60 seconds, then try generating the summary again!"}
-        return {"summary": "An unexpected error occurred while generating the summary."}
+        return {"summary": "An error occurred while generating the summary."}
     
-    # Insert the final generated report into the database under 'chief_complaint' as a general report dump.
-    # IMPORTANT: This insert activates our Postgres Stored Procedure TRIGGER to close the session!
-    cursor.execute(
-        "INSERT INTO triage_summaries (session_id, chief_complaint) VALUES (%s, %s)",
-        (session_id, summary_result)
-    )
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    # Passing the role to the database
+    insert_summary(session_id, summary_result, role=current_user['role'])
     
     return {"summary": summary_result}
+
+@app.get("/analytics")
+async def get_analytics(current_user: dict = Depends(get_current_user)):
+    """Returns summarized analytics for the doctor dashboard."""
+    stats = get_weekly_analytics(role=current_user['role'])
+    symptoms = get_symptom_data(role=current_user['role'])
+    return {
+        "stats": stats,
+        "symptoms": symptoms
+    }
+
+@app.get("/audit_logs")
+async def get_logs(current_user: dict = Depends(get_current_user)):
+    """Returns the recent system activity for the auditing dashboard."""
+    # Auditing view is usually restricted to Admin or Senior Doctors
+    if current_user['role'] not in ['admin', 'doctor']:
+         raise HTTPException(status_code=403, detail="Not authorized to view audit logs")
+    logs = get_audit_logs()
+    return {"logs": logs}

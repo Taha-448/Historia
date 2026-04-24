@@ -1,18 +1,34 @@
-# AI Triage Nurse & Live Doctor Dashboard
-A full-stack, AI-powered telemedicine pre-consultation platform built for Advanced DBMS.
+# 🩺 Triage AI Nurse Bot (Historia)
 
-## Motivation & Problem Statement
-Doctors spend critical time gathering routine history. Telemedicine platforms often lack intelligent pre-screening. This system addresses this by introducing an empathetic AI Virtual Triage Nurse that safely gathers patient history across multiple channels without ever diagnosing or prescribing medicine.
+Historia is a high-performance, medical-grade triage assistant that automates patient history taking and provides real-time emergency detection and practice analytics using advanced AI and database concepts.
 
-## System Architecture
-- **Web App (React.js)**: Features a dual-interface. The left side is a patient chat interface simulating an Oladoc-style clinic, and the right side is a **Live Doctor Dashboard** pulling active waiting patients securely from the database.
-- **WhatsApp Integration (Twilio Sandbox)**: Accessible triage for patients securely tied to their personal phone number.
-- **AI Engine (OpenAI GPT-4o-mini)**: Strongly governed by strict prompt engineering instructing it to strictly gather: *Chief Complaint, Duration, Severity, and Medical History*.
-- **Backend (FastAPI)**: Modern Python web server handling Web REST endpoints (`/chat/web`), Doctor Summaries (`/summary`), and asynchronous Twilio Webhooks (`/chat/whatsapp`).
-- **Relational Database (PostgreSQL)**: Fully normalized architecture design (`patients`, `chat_sessions`, `messages`, `triage_summaries`) fulfilling the Advanced Database requirements, implementing query Indexes, Primary/Foreign Keys, and automated PL/pgSQL Triggers to manage chat session lifetimes.
+## 🚀 Key Features
 
-## Project Structure
-* `/Backend/` - Python FastAPI server `main.py`, Environment Variables `.env`, and core Database creation script `schema.sql`. Also includes `diagnose_openai.py` for API verification.
-* `/client/` - React frontend UI (`App.js`), components, and styles.
-* `README.md` - Core project architecture (this file).
-* `SETUP.md` - Step-by-step local execution and environment setup instructions.
+### 1. Automated Intelligent Triage
+*   **Emergency Detection**: Real-time SQL triggers scan patient summaries for critical red-flags and immediately alert doctors with visual UI "Critical Alert" badges.
+*   **Patient History**: Structured history taking based on Chief Complaint, Duration, Severity, and Medical History.
+
+### 2. Enterprise-Grade Security
+*   **RBAC (Role-Based Access Control)**: Tiered access for Doctors, Nurses, and Admins.
+*   **Postgres RLS (Row Level Security)**: Data security enforced at the database engine level—sensitive summaries are invisible to unauthorized personnel even at the API layer.
+*   **JWT Authentication**: Secure login system with encrypted token-based sessions.
+
+### 3. Practice Management & Analytics
+*   **Analytics Dashboard**: Insightful reports on average triage duration, weekly patient volume, and emergency case ratios.
+*   **Symptom Distribution**: Visual histograms showing the frequency of symptoms like Fever, Pain, or Cough across the practice.
+*   **Audit Logging**: Full traceability with a "System Activity" feed showing every summary insertion or update with detailed diff-tracking.
+
+## 🛠️ Technology Stack
+*   **Frontend**: React.js, Vanilla CSS, Axios.
+*   **Backend**: FastAPI, Python 3.14 (Experimental Support), OpenAI GPT-4o-mini.
+*   **Database**: PostgreSQL 14+ (ACID Compliant).
+*   **Security**: JSON Web Tokens (JWT), passlib (PBKDF2 Hashing).
+*   **Integration**: Twilio WhatsApp API.
+
+## 👥 Roles & Permissions
+*   **Doctor (Taha)**: Can view full medical summaries, run analytics, and view audit trails.
+*   **Nurse (Haad)**: Manages the live waiting room and patient flow.
+*   **Admin**: System-wide management.
+
+---
+*Developed for advanced clinical triage automation.*
