@@ -3,6 +3,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from pathlib import Path
+from redis_client import redis_client
+
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -125,7 +127,20 @@ def get_or_create_patient_session(phone_number: str) -> int:
         conn.close()
 
 def get_chat_history(session_id: int) -> str:
-    """Retrieves all past messages for a specific session to feed to the AI."""
+    """Retrieves past messages, using Redis as a cache (Option 1)."""
+    cache_key = f"history:{session_id}"
+    
+    # 1. Try fetching from Redis first
+    if redis_client:
+        try:
+            cached_history = redis_client.get(cache_key)
+            if cached_history:
+                print(f"Cache Hit! Loading session {session_id} from Redis.")
+                return cached_history
+        except Exception as e:
+            print(f"Redis Cache Read Error: {e}")
+
+    # 2. If not in cache, fetch from PostgreSQL
     conn = get_db_connection()
     if not conn: return ""
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -140,19 +155,35 @@ def get_chat_history(session_id: int) -> str:
                 history_str += f"Patient: {msg['content']}\n"
             else:
                 history_str += f"Nurse: {msg['content']}\n"
+        
+        # 3. Store in Redis for 1 hour (3600 seconds)
+        if redis_client:
+            try:
+                redis_client.set(cache_key, history_str, ex=3600)
+            except Exception as e:
+                print(f"Redis Cache Write Error: {e}")
+            
         return history_str
     finally:
         cursor.close()
         conn.close()
 
 def save_message(session_id: int, sender_type: str, content: str):
-    """Logs a standalone message into the relational database."""
+    """Logs a message and invalidates the Redis history cache."""
     conn = get_db_connection()
     if not conn: return
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO messages (session_id, sender_type, content) VALUES (%s, %s, %s)", (session_id, sender_type, content))
         conn.commit()
+        
+        # Invalidate the cache so the next request re-fetches updated history
+        if redis_client:
+            try:
+                redis_client.delete(f"history:{session_id}")
+            except Exception as e:
+                print(f"Redis Cache Delete Error: {e}")
+            
     finally:
         cursor.close()
         conn.close()

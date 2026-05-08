@@ -13,6 +13,8 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from typing import Optional
+from redis_client import redis_client
+
 
 from database import (
     get_or_create_patient_session, 
@@ -112,7 +114,35 @@ prompt = PromptTemplate(
 initialize_db()
 
 
+# --- REDIS RATE LIMITER (Option 4) ---
+async def check_rate_limit(identifier: str):
+    if not redis_client:
+        return # Skip if Redis is down
+    
+    key = f"ratelimit:{identifier}"
+    try:
+        # Increment the count for this user
+        count = redis_client.incr(key)
+        print(f"Rate Limit Check: User {identifier} has sent {count}/30 messages.")
+        
+        # If it's the first message in this window, set expiration to 60 seconds
+        if count == 1:
+            redis_client.expire(key, 60)
+            
+        # Check against the 30-message limit
+        if count > 30:
+            raise HTTPException(
+                status_code=429, 
+                detail="Too many messages. Please wait 60 seconds."
+            )
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Rate limit error: {e}")
+        return # Fail open if Redis has an issue
+
 # --- API ENDPOINTS ---
+
 
 @app.post("/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -126,6 +156,9 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 @app.post("/chat/web")
 async def web_chat(message: dict):
     user_message = message.get("text")
+    
+    # Apply Rate Limit based on IP (Guest identifier)
+    await check_rate_limit("WEB_GUEST_001")
     
     # Since Web users don't log in right now, we route them to a global "Web" phone number acting as a Session tracker
     session_id = get_or_create_patient_session("WEB_GUEST_001")
@@ -157,6 +190,9 @@ async def whatsapp_chat(Body: str = Form(...), From: str = Form(...)):
     # Twilio sends WhatsApp numbers formatted as "whatsapp:+1234567890"
     # We strip "whatsapp:" off so it perfectly fits our strict 20-character database limit!
     clean_phone = From.replace("whatsapp:", "")
+    
+    # Apply Rate Limit based on Phone Number
+    await check_rate_limit(clean_phone)
     
     session_id = get_or_create_patient_session(clean_phone)
     
