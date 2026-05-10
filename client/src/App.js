@@ -3,12 +3,13 @@ import { BrowserRouter as Router, Routes, Route, Link, Navigate } from 'react-ro
 import PatientPortal from './PatientPortal';
 import DoctorDashboard from './DoctorDashboard';
 import Login from './Login';
+import Signup from './Signup';
 import './App.css';
 
 function App() {
   const [messages, setMessages] = useState([{ sender: 'AI', text: 'Hello, I am Historia, your medical assistant. How can I help you today?' }]);
   const [input, setInput] = useState('');
-  
+
   // Auth State
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('staffUser')) || null);
 
@@ -31,13 +32,13 @@ function App() {
           <div className="navbar-links">
             <Link to="/" className="nav-link">Patient Portal</Link>
             {!user ? (
-               <Link to="/login" className="nav-link">Staff Login</Link>
+              <Link to="/login" className="nav-link">Staff Login</Link>
             ) : (
-                <>
-                    <span className="user-badge">👤 {user.username} ({user.role})</span>
-                    <Link to="/doctor" className="nav-link">Dashboard</Link>
-                    <span onClick={handleLogout} className="nav-link logout-link">Logout</span>
-                </>
+              <>
+                <span className="user-badge">👤 {user.username} ({user.role.charAt(0).toUpperCase() + user.role.slice(1)})</span>
+                <Link to="/doctor" className="nav-link">Dashboard</Link>
+                <span onClick={handleLogout} className="nav-link logout-link">Logout</span>
+              </>
             )}
           </div>
         </nav>
@@ -46,18 +47,21 @@ function App() {
         <main className="main-content">
           <Routes>
             <Route path="/" element={
-              <PatientPortal 
-                messages={messages} 
-                setMessages={setMessages} 
-                input={input} 
-                setInput={setInput} 
+              <PatientPortal
+                messages={messages}
+                setMessages={setMessages}
+                input={input}
+                setInput={setInput}
               />
             } />
             <Route path="/login" element={
-                user ? <Navigate to="/doctor" /> : <Login onLogin={handleLogin} />
+              user ? <Navigate to="/doctor" /> : <Login onLogin={handleLogin} />
+            } />
+            <Route path="/signup" element={
+              user ? <Navigate to="/doctor" /> : <Signup />
             } />
             <Route path="/doctor" element={
-                user ? <DoctorDashboard user={user} /> : <Navigate to="/login" />
+              user ? <DoctorDashboard user={user} /> : <Navigate to="/login" />
             } />
           </Routes>
         </main>

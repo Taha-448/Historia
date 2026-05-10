@@ -15,15 +15,16 @@ CREATE TABLE staff_users (
     username VARCHAR(50) UNIQUE NOT NULL,
     hashed_password TEXT NOT NULL,
     role VARCHAR(20) NOT NULL CHECK (role IN ('admin', 'doctor', 'nurse')),
+    is_verified BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Seed initial users for testing
--- (In production, these would be created via an Admin UI)
-INSERT INTO staff_users (username, hashed_password, role) 
-VALUES ('taha', 'doctor_hash_placeholder', 'doctor'),
-       ('haad', 'nurse_hash_placeholder', 'nurse'),
-       ('admin_user', 'admin_hash_placeholder', 'admin')
+-- Seed initial users for testing (These are already verified)
+-- (Passwords will be handled by the Python seeding script)
+INSERT INTO staff_users (username, hashed_password, role, is_verified) 
+VALUES ('taha', 'placeholder', 'doctor', TRUE),
+       ('haad', 'placeholder', 'nurse', TRUE),
+       ('admin_user', 'placeholder', 'admin', TRUE)
 ON CONFLICT (username) DO NOTHING;
 
 -- 0. Flat Data Collection (The new requirement)
@@ -198,7 +199,8 @@ BEGIN
         COUNT(CASE WHEN s.is_critical THEN 1 END)::INT
     FROM chat_sessions c
     JOIN triage_summaries s ON c.session_id = s.session_id
-    WHERE c.created_at > NOW() - INTERVAL '7 days';
+    WHERE c.created_at > NOW() - INTERVAL '7 days'
+      AND (EXTRACT(EPOCH FROM (s.created_at - c.created_at))/60) < 120;
 END; $$ LANGUAGE plpgsql;
 
 -- Returns frequency distribution of common symptoms

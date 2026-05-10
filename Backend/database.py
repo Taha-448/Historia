@@ -4,6 +4,10 @@ from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from pathlib import Path
 from redis_client import redis_client
+from passlib.context import CryptContext
+
+# Set up password hashing
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 
 load_dotenv()
@@ -36,29 +40,41 @@ def get_user_by_username(username: str):
         cursor.close()
         conn.close()
 
-def create_staff_user(username, hashed_password, role):
+def create_staff_user(username, hashed_password, role, is_verified=False):
     """Creates a new staff member with a specific role."""
     conn = get_db_connection()
     if not conn: return
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO staff_users (username, hashed_password, role) VALUES (%s, %s, %s)",
-            (username, hashed_password, role)
+            "INSERT INTO staff_users (username, hashed_password, role, is_verified) VALUES (%s, %s, %s, %s)",
+            (username, hashed_password, role, is_verified)
         )
         conn.commit()
     finally:
         cursor.close()
         conn.close()
 
+def verify_staff_user(username: str):
+    """Admin tool to approve a pending doctor or nurse."""
+    conn = get_db_connection()
+    if not conn: return
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE staff_users SET is_verified = TRUE WHERE username = %s", (username,))
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
 def initialize_db():
-    """Creates necessary tables if they do not already exist."""
+    """Creates necessary tables and seeds default users."""
     conn = get_db_connection()
     if not conn:
         return
     
     cursor = conn.cursor()
-    # Create the 'conversations' table as requested
+    # 1. Create the 'conversations' table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
             id SERIAL PRIMARY KEY,
@@ -67,12 +83,38 @@ def initialize_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # The existing schema should be handled by schema.sql, 
-    # but we ensure the basic structure if needed.
+    
+    # 2. Seed default users if they are still using placeholders
+    default_users = [
+        ('taha', 'doctor'),
+        ('haad', 'nurse'),
+        ('admin_user', 'admin')
+    ]
+    
+    default_password_hash = pwd_context.hash("password123")
+    
+    for username, role in default_users:
+        # Check if user exists and has placeholder or needs update
+        cursor.execute("SELECT hashed_password FROM staff_users WHERE username = %s", (username,))
+        result = cursor.fetchone()
+        
+        if result and (result[0] == 'placeholder' or result[0].startswith('doctor_hash')):
+            print(f"Seeding default password for {username}...")
+            cursor.execute(
+                "UPDATE staff_users SET hashed_password = %s, is_verified = TRUE WHERE username = %s",
+                (default_password_hash, username)
+            )
+        elif not result:
+             # If user doesn't exist at all (e.g. fresh DB)
+             cursor.execute(
+                "INSERT INTO staff_users (username, hashed_password, role, is_verified) VALUES (%s, %s, %s, TRUE)",
+                (username, default_password_hash, role)
+            )
+
     conn.commit()
     cursor.close()
     conn.close()
-    print("Database initialized.")
+    print("Database initialized and users seeded.")
 
 def save_conversation(user_input, ai_response):
     """Inserts a user message and AI response pair into the conversations table."""
@@ -205,7 +247,7 @@ def get_active_sessions_list(role: str = 'nurse'):
             FROM chat_sessions c
             JOIN patients p ON c.patient_id = p.patient_id
             LEFT JOIN triage_summaries s ON c.session_id = s.session_id
-            WHERE c.is_active = TRUE OR s.is_critical = TRUE
+            WHERE c.is_active = TRUE
             ORDER BY is_critical DESC, c.created_at DESC
         """)
         sessions = cursor.fetchall()

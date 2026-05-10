@@ -4,9 +4,12 @@ import axios from 'axios';
 function DoctorDashboard({ user }) {
   const [activePatients, setActivePatients] = useState([]);
   const [summary, setSummary] = useState('');
-  const [view, setView] = useState('waiting'); // 'waiting', 'analytics', or 'audit'
+  const [view, setView] = useState('waiting'); // 'waiting', 'analytics', 'audit', or 'staff'
   const [analytics, setAnalytics] = useState(null);
   const [logs, setLogs] = useState([]);
+  const [pendingStaff, setPendingStaff] = useState([]);
+
+  console.log("Current View:", view);
 
   const fetchActivePatients = async () => {
     try {
@@ -40,6 +43,29 @@ function DoctorDashboard({ user }) {
       console.error("Failed to fetch logs:", error);
     }
   };
+  const fetchPendingStaff = async () => {
+    try {
+      const response = await axios.get('http://localhost:8000/admin/pending_staff', {
+          headers: { Authorization: `Bearer ${user.token}` }
+      });
+      console.log("API Response for Pending Staff:", response.data);
+      setPendingStaff(response.data.pending || []);
+    } catch(error) {
+      console.error("Failed to fetch pending staff:", error);
+    }
+  };
+
+  const handleVerifyStaff = async (username) => {
+    try {
+        await axios.post(`http://localhost:8000/admin/verify_staff?username=${username}`, {}, {
+            headers: { Authorization: `Bearer ${user.token}` }
+        });
+        fetchPendingStaff(); // Refresh the list
+        alert(`User ${username} verified successfully!`);
+    } catch (error) {
+        alert("Failed to verify user.");
+    }
+  };
 
   useEffect(() => {
     if (view === 'waiting') {
@@ -50,13 +76,16 @@ function DoctorDashboard({ user }) {
         fetchAnalytics();
     } else if (view === 'audit') {
         fetchLogs();
+    } else if (view === 'staff') {
+        fetchPendingStaff();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
 
   const generateSummary = async (sessionId) => {
     try {
       setSummary("Generating summary for Session #" + sessionId + "...");
-      const response = await axios.get(`http://127.0.0.1:8000/summary?session_id=${sessionId}`, {
+      const response = await axios.get(`http://localhost:8000/summary?session_id=${sessionId}`, {
           headers: { Authorization: `Bearer ${user.token}` }
       });
       setSummary(response.data.summary);
@@ -94,6 +123,14 @@ function DoctorDashboard({ user }) {
               >
                 System Audit Logs
               </button>
+              {user.role === 'admin' && (
+                <button 
+                  className={`tab-btn ${view === 'staff' ? 'active' : ''}`}
+                  onClick={() => setView('staff')}
+                >
+                  Manage Staff
+                </button>
+              )}
             </>
           )}
         </div>
@@ -181,7 +218,7 @@ function DoctorDashboard({ user }) {
               <p>Loading analytics...</p>
             )}
           </div>
-        ) : (
+        ) : view === 'audit' ? (
           <div className="audit-view">
             <h3>Recent System Activity</h3>
             <div className="table-responsive">
@@ -215,6 +252,51 @@ function DoctorDashboard({ user }) {
               </table>
             </div>
           </div>
+        ) : view === 'staff' ? (
+          <div className="staff-view">
+            <h3>Pending Staff Verification</h3>
+            <p>The following users have signed up and are awaiting approval.</p>
+            {pendingStaff.length === 0 ? (
+                <div style={{ padding: '20px', textAlign: 'center', border: '1px dashed #ccc', borderRadius: '8px', marginTop: '20px' }}>
+                    <p><i>No pending verifications found in the database.</i></p>
+                </div>
+            ) : (
+                <div className="table-responsive">
+                    <table className="audit-table">
+                        <thead>
+                            <tr>
+                                <th>Username</th>
+                                <th>Role</th>
+                                <th>Requested At</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {pendingStaff.map(staff => (
+                                <tr key={staff.username}>
+                                    <td>{staff.username}</td>
+                                    <td><strong>{staff.role.charAt(0).toUpperCase() + staff.role.slice(1)}</strong></td>
+                                    <td>{new Date(staff.created_at).toLocaleDateString()}</td>
+                                    <td>
+                                        <button 
+                                            onClick={() => handleVerifyStaff(staff.username)}
+                                            className="summary-btn"
+                                            style={{ backgroundColor: '#28a745', fontSize: '12px', padding: '5px 10px', width: 'auto' }}
+                                        >
+                                            Approve & Verify
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+          </div>
+        ) : (
+            <div style={{ padding: '20px', textAlign: 'center' }}>
+                <p>Please select a tab above to view data.</p>
+            </div>
         )}
       </div>
     </div>

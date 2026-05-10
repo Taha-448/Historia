@@ -21,7 +21,8 @@ function Login({ onLogin }) {
       const { access_token, role } = response.data;
       onLogin({ username, role, token: access_token });
     } catch (err) {
-      setError('Invalid username or password');
+      // Display the specific error message from the backend (e.g. "Account pending verification")
+      setError(err.response?.data?.detail || 'Invalid username or password');
     }
   };
 
@@ -31,9 +32,10 @@ function Login({ onLogin }) {
         <h2>🏥 Medical Staff Login</h2>
         <p>Please enter your credentials to access the portal.</p>
         
-        {error && <div className="error-alert">{error}</div>}
+        {error && <div className="error-alert" style={{ backgroundColor: '#f8d7da', color: '#721c24', padding: '10px', borderRadius: '5px', marginBottom: '15px' }}>{error}</div>}
         
         <form onSubmit={handleSubmit}>
+          {/* ... existing input fields ... */}
           <div className="form-group">
             <label>Username</label>
             <input 
@@ -60,6 +62,7 @@ function Login({ onLogin }) {
         </form>
         
         <div className="login-footer">
+          <p>New staff member? <a href="/signup">Create an account</a></p>
           <small>Restricted Access - Authorized Personnel Only</small>
         </div>
       </div>

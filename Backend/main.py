@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Form
+from fastapi import FastAPI, Depends, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from twilio.twiml.messaging_response import MessagingResponse
@@ -7,13 +7,13 @@ from langchain_core.prompts import PromptTemplate
 import os
 from dotenv import load_dotenv
 from pathlib import Path
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from typing import Optional
-from redis_client import redis_client
+from redis_client import redis_client, check_rate_limit, cache_chat_history, get_cached_chat_history
+from psycopg2.extras import RealDictCursor
 
 
 from database import (
@@ -28,7 +28,10 @@ from database import (
     get_weekly_analytics,
     get_symptom_data,
     get_audit_logs,
-    get_user_by_username
+    get_user_by_username,
+    create_staff_user,
+    verify_staff_user,
+    get_db_connection
 )
 
 # JWT Security Settings
@@ -113,36 +116,7 @@ prompt = PromptTemplate(
 # Initialize database tables on startup
 initialize_db()
 
-
-# --- REDIS RATE LIMITER (Option 4) ---
-async def check_rate_limit(identifier: str):
-    if not redis_client:
-        return # Skip if Redis is down
-    
-    key = f"ratelimit:{identifier}"
-    try:
-        # Increment the count for this user
-        count = redis_client.incr(key)
-        print(f"Rate Limit Check: User {identifier} has sent {count}/30 messages.")
-        
-        # If it's the first message in this window, set expiration to 60 seconds
-        if count == 1:
-            redis_client.expire(key, 60)
-            
-        # Check against the 30-message limit
-        if count > 30:
-            raise HTTPException(
-                status_code=429, 
-                detail="Too many messages. Please wait 60 seconds."
-            )
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        print(f"Rate limit error: {e}")
-        return # Fail open if Redis has an issue
-
 # --- API ENDPOINTS ---
-
 
 @app.post("/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -150,53 +124,114 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     if not user or not pwd_context.verify(form_data.password, user['hashed_password']):
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     
+    # Check if user is verified
+    if not user.get('is_verified', False):
+        raise HTTPException(status_code=403, detail="Account pending admin verification.")
+    
     access_token = create_access_token(data={"sub": user['username'], "role": user['role']})
     return {"access_token": access_token, "token_type": "bearer", "role": user['role']}
 
+@app.post("/signup")
+async def signup(username: str = Form(...), password: str = Form(...), role: str = Form(...)):
+    # Check if user already exists
+    if get_user_by_username(username):
+        raise HTTPException(status_code=400, detail="Username already taken")
+    
+    hashed_password = pwd_context.hash(password)
+    
+    # Auto-verify only Nurses. Doctors and Admins require manual approval.
+    is_verified = True if role == 'nurse' else False
+    
+    create_staff_user(username, hashed_password, role, is_verified=is_verified)
+    
+    detail = "Account created. You can log in now."
+    if role in ['doctor', 'admin']:
+        detail = f"Account created. Please wait for an existing admin to verify your {role} profile."
+        
+    return {"detail": detail}
+
+@app.post("/admin/verify_staff")
+async def verify_staff(username: str, current_user: dict = Depends(get_current_user)):
+    if current_user['role'] != 'admin':
+        raise HTTPException(status_code=403, detail="Only admins can verify staff.")
+    
+    verify_staff_user(username)
+    return {"detail": f"User {username} has been verified."}
+
+@app.get("/admin/pending_staff")
+async def get_pending_staff(current_user: dict = Depends(get_current_user)):
+    if current_user['role'] != 'admin':
+        raise HTTPException(status_code=403, detail="Only admins can view pending staff.")
+    
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT username, role, created_at FROM staff_users WHERE is_verified = FALSE")
+        pending = cursor.fetchall()
+        for p in pending:
+            p['created_at'] = str(p['created_at'])
+        return {"pending": pending}
+    finally:
+        cursor.close()
+        conn.close()
+
 @app.post("/chat/web")
-async def web_chat(message: dict):
+async def web_chat(request: Request, message: dict):
     user_message = message.get("text")
+    client_ip = request.client.host
     
-    # Apply Rate Limit based on IP (Guest identifier)
-    await check_rate_limit("WEB_GUEST_001")
+    # 1. Rate Limiting (Redis)
+    is_allowed = check_rate_limit(client_ip)
+    if not is_allowed:
+        raise HTTPException(status_code=429, detail="Too many messages. Please wait 60 seconds.")
     
-    # Since Web users don't log in right now, we route them to a global "Web" phone number acting as a Session tracker
-    session_id = get_or_create_patient_session("WEB_GUEST_001")
+    # 2. Session & History with Caching (Redis)
+    session_id = get_or_create_patient_session(client_ip)
     
-    # 1. Fetch History from Secure Postgres DB
-    history = get_chat_history(session_id)
+    history = get_cached_chat_history(session_id)
+    if not history:
+        history = get_chat_history(session_id)
+        cache_chat_history(session_id, history)
     
-    # 2. Invoke LangChain 
+    # 3. Invoke LangChain 
     final_prompt = prompt.format(history=history, human_input=user_message)
     
     try:
         ai_response = llm.invoke(final_prompt).content
     except Exception as e:
         if "429" in str(e) or "rate_limit" in str(e).lower():
-            return {"response": "The AI Doctor is currently busy due to OpenAI rate limits. Please wait 60 seconds and click Send again!"}
+            return {"response": "The AI Doctor is currently busy due to OpenAI rate limits. Please wait 60 seconds."}
         return {"response": "An unexpected server error occurred."}
     
-    # 3. Save Both Messages to Postgres
+    # 4. Save to Postgres & Update Cache
     save_message(session_id, "Human", user_message)
     save_message(session_id, "AI", ai_response)
-    
-    # 4. Save to the new 'conversations' table as requested
     save_conversation(user_message, ai_response)
+    
+    # Refresh cache so the next turn sees the new messages
+    history = get_chat_history(session_id)
+    cache_chat_history(session_id, history)
     
     return {"response": ai_response}
 
 @app.post("/chat/whatsapp")
-async def whatsapp_chat(Body: str = Form(...), From: str = Form(...)):
-    # Twilio sends WhatsApp numbers formatted as "whatsapp:+1234567890"
-    # We strip "whatsapp:" off so it perfectly fits our strict 20-character database limit!
+async def whatsapp_chat(request: Request, Body: str = Form(...), From: str = Form(...)):
     clean_phone = From.replace("whatsapp:", "")
     
-    # Apply Rate Limit based on Phone Number
-    await check_rate_limit(clean_phone)
-    
+    # 1. Rate Limiting (Redis)
+    is_allowed = check_rate_limit(clean_phone)
+    if not is_allowed:
+        resp = MessagingResponse()
+        resp.message("Rate limit exceeded. Please wait a moment.")
+        return PlainTextResponse(str(resp), media_type="application/xml")
+
+    # 2. Session & History with Caching (Redis)
     session_id = get_or_create_patient_session(clean_phone)
     
-    history = get_chat_history(session_id)
+    history = get_cached_chat_history(session_id)
+    if not history:
+        history = get_chat_history(session_id)
+        cache_chat_history(session_id, history)
     
     final_prompt = prompt.format(history=history, human_input=Body)
     
@@ -205,15 +240,17 @@ async def whatsapp_chat(Body: str = Form(...), From: str = Form(...)):
     except Exception as e:
         if "429" in str(e) or "rate_limit" in str(e).lower():
             resp = MessagingResponse()
-            resp.message("The AI Doctor is currently busy with high patient volume (OpenAI limit). Please wait exactly 1 minute before sending another message.")
+            resp.message("System busy. Please wait 60 seconds.")
             return PlainTextResponse(str(resp), media_type="application/xml")
         raise e
     
     save_message(session_id, "Human", Body)
     save_message(session_id, "AI", ai_response)
-    
-    # Save to the new 'conversations' table as requested
     save_conversation(Body, ai_response)
+    
+    # Refresh cache so the next turn sees the new messages
+    history = get_chat_history(session_id)
+    cache_chat_history(session_id, history)
     
     resp = MessagingResponse()
     resp.message(ai_response)
@@ -226,32 +263,23 @@ async def get_active_sessions(current_user: dict = Depends(get_current_user)):
 
 @app.get("/summary")
 async def generate_summary(session_id: int, current_user: dict = Depends(get_current_user)):
-    """Generates the summary for the SPECIFIC requested session in DB."""
-    
-    # Verify the session exists and is active
     if not verify_session_active(session_id):
         return {"summary": "This session is either not active or does not exist."}
         
     chat_history = get_chat_history(session_id)
-    
     if not chat_history:
         return {"summary": "No messages in the current session."}
     
-    # ... (Prompt logic) ...
     summary_template = """
-    You are an expert medical assistant. Based on the conversation below between a triage nurse and a patient, extract the following information and format it clearly for a doctor:
-    
+    You are an expert medical assistant. Based on the conversation below, extract:
     - Chief Complaint:
     - Duration:
     - Severity:
     - Medical History:
-    
-    If any information is missing, simply write "Not provided". Do NOT invent information.
+    If missing, write "Not provided".
     
     Conversation:
     {chat_history}
-    
-    Structured Summary:
     """
     
     summary_prompt = PromptTemplate(input_variables=["chat_history"], template=summary_template)
@@ -262,25 +290,17 @@ async def generate_summary(session_id: int, current_user: dict = Depends(get_cur
     except Exception as e:
         return {"summary": "An error occurred while generating the summary."}
     
-    # Passing the role to the database
     insert_summary(session_id, summary_result, role=current_user['role'])
-    
     return {"summary": summary_result}
 
 @app.get("/analytics")
 async def get_analytics(current_user: dict = Depends(get_current_user)):
-    """Returns summarized analytics for the doctor dashboard."""
     stats = get_weekly_analytics(role=current_user['role'])
     symptoms = get_symptom_data(role=current_user['role'])
-    return {
-        "stats": stats,
-        "symptoms": symptoms
-    }
+    return {"stats": stats, "symptoms": symptoms}
 
 @app.get("/audit_logs")
 async def get_logs(current_user: dict = Depends(get_current_user)):
-    """Returns the recent system activity for the auditing dashboard."""
-    # Auditing view is usually restricted to Admin or Senior Doctors
     if current_user['role'] not in ['admin', 'doctor']:
          raise HTTPException(status_code=403, detail="Not authorized to view audit logs")
     logs = get_audit_logs()
