@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+psycopg2-binary
+langchain-openai
+python-dotenv
+redis
+python-jose[cryptography]
+passlib[pbkdf2_sha256]
+python-multipart
+twilio
