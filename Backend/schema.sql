@@ -6,9 +6,7 @@ DROP TABLE IF EXISTS chat_sessions CASCADE;
 DROP TABLE IF EXISTS patients CASCADE;
 DROP TABLE IF EXISTS staff_users CASCADE;
 
--- ==========================================
--- 0. USER AUTHENTICATION & ROLES
--- ==========================================
+
 
 CREATE TABLE staff_users (
     user_id SERIAL PRIMARY KEY,
@@ -74,18 +72,14 @@ CREATE TABLE triage_summaries (
     CONSTRAINT fk_session_summary FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
 );
 
--- ==========================================
--- PERFORMANCE OPTIMIZATION (INDEXING)
--- ==========================================
+
 -- Index for extremely fast message retrieval for active chat sessions
 CREATE INDEX idx_messages_session_id ON messages(session_id);
 
 -- Index to quickly find all sessions belonging to a specific patient
 CREATE INDEX idx_sessions_patient_id ON chat_sessions(patient_id);
 
--- ==========================================
--- DATA PROCESSING (STORED PROCEDURES & TRIGGERS)
--- ==========================================
+
 -- Stored Procedure: Automatically close a chat session when a summary is generated
 CREATE OR REPLACE FUNCTION finalize_triage_session()
 RETURNS TRIGGER AS $$
@@ -123,9 +117,7 @@ BEFORE INSERT ON triage_summaries
 FOR EACH ROW
 EXECUTE FUNCTION assess_critical_condition();
 
--- ==========================================
--- 5. AUDIT & LOGGING
--- ==========================================
+
 
 -- Create the Audit Log table
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -159,9 +151,7 @@ FOR EACH ROW
 EXECUTE FUNCTION log_summary_activity();
 
 
--- ==========================================
--- 6. SESSION LIFECYCLE MANAGEMENT
--- ==========================================
+
 
 -- Function to close old active sessions automatically
 CREATE OR REPLACE FUNCTION clean_stale_sessions()
@@ -184,9 +174,7 @@ BEFORE INSERT ON chat_sessions
 FOR EACH ROW
 EXECUTE FUNCTION clean_stale_sessions();
 
--- ==========================================
--- 7. ADVANCED ANALYTICS (Stored Procedures)
--- ==========================================
+
 
 -- Returns weekly performance stats
 CREATE OR REPLACE FUNCTION get_analytics_summary()
@@ -216,9 +204,8 @@ BEGIN
     UNION ALL
     SELECT 'Pain'::TEXT, COUNT(*)::INT FROM triage_summaries WHERE chief_complaint ~* 'pain'
     UNION ALL
--- ==========================================
--- 8. ROW LEVEL SECURITY (RLS) POLICIES
--- ==========================================
+    SELECT 'Breathing Difficulty'::TEXT, COUNT(*)::INT FROM triage_summaries WHERE chief_complaint ~* 'breathing|breath';
+END; $$ LANGUAGE plpgsql;
 
 -- Enable RLS on sensitive tables
 ALTER TABLE triage_summaries ENABLE ROW LEVEL SECURITY;
